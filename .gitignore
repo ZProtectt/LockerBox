@@ -1,0 +1,20 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# --- Outils/IDE ---
+.vscode/
+.DS_Store
+Thumbs.db
+
+# --- Tests & Logs ---
+.pytest_cache/
+*.log
+
+# --- SÉCURITÉ : Fichiers Vault ---
+# Ne jamais pousser le vault lui-même sur le dépôt public
+*.vault
+*.dat
