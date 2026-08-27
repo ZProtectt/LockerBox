@@ -1,20 +1,31 @@
-# --- Python ---
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Environnements virtuels
 venv/
+.venv/
 .env
 
-# --- Outils/IDE ---
+# Outils et IDE
 .vscode/
 .DS_Store
 Thumbs.db
 
-# --- Tests & Logs ---
+# Tests et cache
 .pytest_cache/
 *.log
 
-# --- SÉCURITÉ : Fichiers Vault ---
-# Ne jamais pousser le vault lui-même sur le dépôt public
+# Fichiers vault (ne jamais versionner)
 *.vault
 *.dat
+*.lbox
+
+# Build PyInstaller
+dist/
+build/
+*.spec
+
+# Divers
+.clineignore

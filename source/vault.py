@@ -1,83 +1,224 @@
+import json
 import os
 import struct
-from source.keys import derive_key, encrypt_data, decrypt_data
+import time
 
-MAGIC_BYTES = b"LOCK"
+from source.crypto import derive_key, encrypt_data, decrypt_data
+from cryptography.exceptions import InvalidTag
 
-class VaultManager:
-    def __init__(self, vault_path):
+
+class IntegrityError(Exception):
+    """Levée quand le tag AES-GCM échoue : mauvais mot de passe ou fichier altéré."""
+    pass
+
+
+# ─── Constantes de format du fichier .lbox ─────────────────────────────────
+# Octet 0-3  : magic "LBOX"
+# Octet 4    : version 0x01
+# Octet 5-20 : sel Argon2 (16 octets)
+# Octet 21-24: longueur de l'index chiffré (uint32 little-endian)
+# Octet 25+  : index chiffré (nonce+ciphertext+tag AES-GCM)
+# Suite      : blobs des fichiers (nonce+ciphertext+tag AES-GCM chacun)
+HEADER_SIZE = 25  # 4 (magic) + 1 (version) + 16 (salt) + 4 (index_len)
+MAGIC = b"LBOX"
+VERSION = b"\x01"
+
+
+class Vault:
+    """Coffre-fort chiffré : gère la création, l'ouverture et les opérations sur fichiers."""
+
+    MAX_ATTEMPTS = 3
+    LOCK_DURATION = 30  # secondes
+
+    def __init__(self, vault_path: str, password: str):
         self.vault_path = vault_path
+        self.password = password
+        self.index: dict = {"files": {}}
+        self.salt: bytes | None = None
+        # Clé de données : aléatoire, protégée par wrapped_key dans l'index
+        self.key: bytes | None = None
+        # Anti-bruteforce : état de session uniquement
+        self.failed_attempts = 0
+        self.locked_until = 0.0
 
-    def init_vault(self, password):
-        """Initialise un nouveau vault avec un header."""
-        if os.path.exists(self.vault_path):
-            raise FileExistsError("Le vault existe déjà.")
+    # ──────────────────────────────────────────────────────────────────────
+    # Primitives bas niveau
+    # ──────────────────────────────────────────────────────────────────────
 
-        salt = os.urandom(16)
-        key = derive_key(password, salt)
-        # On crée une clé de vérification pour valider le mot de passe sans déchiffrer tout
-        verifier = encrypt_data(b"VERIFY", key)
+    def _derive_password_key(self, salt: bytes) -> bytes:
+        """Dérive la clé à partir du mot de passe et du sel via Argon2id."""
+        return derive_key(self.password, salt)
 
+    def _build_index_payload(self, password_key: bytes) -> bytes:
+        """Sérialise l'index avec la wrapped_key prête à être chiffrée."""
+        return json.dumps({
+            **self.index,
+            "wrapped_key": encrypt_data(password_key, self.key).hex(),
+        }).encode()
+
+    def _recompute_offsets(self, password_key: bytes) -> None:
+        """Recalcule les offsets absolus de chaque fichier dans le vault.
+
+        On itère deux fois : la taille de l'index dépend des offsets, et les
+        offsets dépendent de la taille de l'index. Deux passes suffisent à la
+        convergence car la taille numérique des entiers est bornée.
+        """
+        for _ in range(2):
+            sample_index = encrypt_data(password_key, self._build_index_payload(password_key))
+            base = HEADER_SIZE + len(sample_index)
+            ptr = 0
+            for info in self.index["files"].values():
+                info["offset"] = base + ptr
+                ptr += info["size"]
+
+    def _read_file_blobs(self) -> bytes:
+        """Relit tous les blobs chiffrés existants dans l'ordre de l'index."""
+        blobs = bytearray()
+        with open(self.vault_path, "rb") as f:
+            for info in self.index["files"].values():
+                f.seek(info["offset"])
+                blobs.extend(f.read(info["size"]))
+        return bytes(blobs)
+
+    def _write_vault(self, blobs: bytes) -> None:
+        """Écrit le fichier vault complet : header + index chiffré + blobs."""
+        password_key = self._derive_password_key(self.salt)
+        self._recompute_offsets(password_key)
+        encrypted_index = encrypt_data(password_key, self._build_index_payload(password_key))
         with open(self.vault_path, "wb") as f:
-            f.write(MAGIC_BYTES)
-            f.write(salt)
-            # Écrire la taille du verifier (I = 4 octets)
-            f.write(struct.pack("I", len(verifier)))
-            f.write(verifier)
+            f.write(MAGIC + VERSION + self.salt)
+            f.write(struct.pack("<I", len(encrypted_index)))
+            f.write(encrypted_index)
+            f.write(blobs)
 
-    def _get_key(self, password):
-        with open(self.vault_path, "rb") as f:
-            f.read(4) # Magic
-            salt = f.read(16)
-            # Lire la taille du verifier
-            verifier_len = struct.unpack("I", f.read(4))[0]
-            f.read(verifier_len) # Skip verifier
-            return derive_key(password, salt)
+    # ──────────────────────────────────────────────────────────────────────
+    # Opérations principales
+    # ──────────────────────────────────────────────────────────────────────
 
-    def list_files(self):
-        """Liste les noms de fichiers dans le vault."""
-        files = []
+    def create_vault(self) -> None:
+        """Crée un nouveau vault vide."""
+        self.salt = os.urandom(16)
+        self.key = os.urandom(32)
+        self.index = {"files": {}}
+        self._write_vault(b"")
+
+    def load_vault(self) -> None:
+        """Charge et déchiffre l'index du vault. Lève IntegrityError si le mot de passe est faux."""
         if not os.path.exists(self.vault_path):
-            return files
+            raise FileNotFoundError("Vault non trouvé.")
+
         with open(self.vault_path, "rb") as f:
-            f.read(4) # Magic
-            f.read(16) # Salt
-            verifier_len = struct.unpack("I", f.read(4))[0]
-            f.read(verifier_len) # Skip verifier
+            magic = f.read(4)
+            f.read(1)  # version
+            self.salt = f.read(16)
+            index_len = struct.unpack("<I", f.read(4))[0]
 
-            while True:
-                name_len_data = f.read(4)
-                if not name_len_data: break
-                name_len = struct.unpack("I", name_len_data)[0]
+            if magic != MAGIC:
+                raise ValueError("Format de fichier inconnu.")
 
-                # 'replace' évite le crash si décodage UTF-8 impossible
-                name = f.read(name_len).decode(errors='replace')
+            password_key = self._derive_password_key(self.salt)
+            try:
+                encrypted_index = f.read(index_len)
+                index_data = decrypt_data(password_key, encrypted_index)
+                self.index = json.loads(index_data.decode())
+                wrapped_key_hex = self.index.pop("wrapped_key", None)
+                self.key = (
+                    decrypt_data(password_key, bytes.fromhex(wrapped_key_hex))
+                    if wrapped_key_hex
+                    else password_key
+                )
+            except (InvalidTag, ValueError, json.JSONDecodeError):
+                raise IntegrityError("Mot de passe incorrect ou vault corrompu.")
 
-                # Lecture sûre de la taille des données
-                data_len_data = f.read(8)
-                if len(data_len_data) < 8: break # Fin de fichier inattendue
-                data_len = struct.unpack("Q", data_len_data)[0]
+    def list_files(self) -> list[str]:
+        """Retourne la liste des noms de fichiers stockés dans le vault."""
+        self.load_vault()
+        return list(self.index["files"].keys())
 
-                f.read(data_len) # Skip data
-                files.append(name)
-        return files
+    def add_file(self, file_path: str) -> None:
+        """Chiffre et ajoute un fichier dans le vault."""
+        if os.path.exists(self.vault_path):
+            self.load_vault()
+            blobs = self._read_file_blobs()
+        else:
+            self.create_vault()
+            blobs = b""
 
-    def add_file(self, filepath, password):
-        """Ajoute un fichier au vault avec vérification d'existence."""
-        filename = os.path.basename(filepath)
+        with open(file_path, "rb") as f:
+            plaintext = f.read()
 
-        # Vérification doublon
-        if filename in self.list_files():
-            raise Exception("Fichier déjà existant")
+        encrypted = encrypt_data(self.key, plaintext)
+        name = os.path.basename(file_path)
+        self.index["files"][name] = {"size": len(encrypted), "offset": 0}
+        self._write_vault(blobs + encrypted)
 
-        key = self._get_key(password)
-        with open(filepath, "rb") as f:
-            data = f.read()
+    def extract_file(self, filename: str, output_path: str) -> None:
+        """Déchiffre et écrit un fichier du vault vers output_path."""
+        self.load_vault()
+        if filename not in self.index["files"]:
+            raise FileNotFoundError(f"Fichier '{filename}' non trouvé.")
 
-        encrypted_data = encrypt_data(data, key)
+        info = self.index["files"][filename]
+        with open(self.vault_path, "rb") as f:
+            f.seek(info["offset"])
+            encrypted = f.read(info["size"])
 
-        with open(self.vault_path, "ab") as f:
-            f.write(struct.pack("I", len(filename.encode())))
-            f.write(filename.encode())
-            f.write(struct.pack("Q", len(encrypted_data)))
-            f.write(encrypted_data)
+        try:
+            plaintext = decrypt_data(self.key, encrypted)
+        except (InvalidTag, ValueError):
+            raise IntegrityError(f"Le fichier '{filename}' est corrompu.")
+
+        with open(output_path, "wb") as f:
+            f.write(plaintext)
+
+    def delete_file(self, filename: str) -> None:
+        """Supprime un fichier du vault en réécrivant uniquement les blobs restants."""
+        self.load_vault()
+        if filename not in self.index["files"]:
+            raise FileNotFoundError(f"Fichier '{filename}' non trouvé.")
+
+        # Lire les blobs à conserver avant de modifier l'index
+        remaining_blobs = bytearray()
+        with open(self.vault_path, "rb") as f:
+            for name, info in self.index["files"].items():
+                if name != filename:
+                    f.seek(info["offset"])
+                    remaining_blobs.extend(f.read(info["size"]))
+
+        del self.index["files"][filename]
+        self._write_vault(bytes(remaining_blobs))
+
+    def change_password(self, new_password: str) -> None:
+        """Change le mot de passe sans rechiffrer les fichiers.
+
+        Seule la wrapped_key (enveloppe de la clé de données) est recréée.
+        Les blobs des fichiers restent inchangés.
+        """
+        if not isinstance(new_password, str) or not new_password:
+            raise ValueError("Le nouveau mot de passe est requis.")
+
+        self.load_vault()
+        blobs = self._read_file_blobs()
+
+        self.password = new_password
+        self.salt = os.urandom(16)
+        self._write_vault(blobs)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Protection anti-bruteforce (état de session)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def is_locked(self) -> bool:
+        """Retourne True si le vault est temporairement verrouillé."""
+        return time.time() < self.locked_until
+
+    def register_failed_attempt(self) -> None:
+        """Enregistre un échec et verrouille si le seuil est atteint."""
+        self.failed_attempts += 1
+        if self.failed_attempts >= self.MAX_ATTEMPTS:
+            self.locked_until = time.time() + self.LOCK_DURATION
+
+    def reset_bruteforce(self) -> None:
+        """Réinitialise le compteur après une authentification réussie."""
+        self.failed_attempts = 0
+        self.locked_until = 0.0
