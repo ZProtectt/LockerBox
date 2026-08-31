@@ -4,7 +4,7 @@ import tempfile
 import pytest
 
 from source.crypto import derive_key, decrypt_data, encrypt_data
-from source.vault import IntegrityError, Vault
+from source.vault import IntegrityError, LockedError, Vault
 
 
 # ── Tests crypto ──────────────────────────────────────────────────────────
@@ -102,9 +102,20 @@ def test_vault_change_password():
 
 
 def test_vault_bruteforce_lock():
-    """Après 3 échecs, is_locked() doit retourner True."""
+    """Après 3 échecs, is_locked() doit retourner True même sur une nouvelle instance."""
     with tempfile.TemporaryDirectory() as d:
-        v = Vault(os.path.join(d, "v.lbox"), "mdp")
+        vault_path = os.path.join(d, "v.lbox")
+
+        # 3 échecs sur une première instance
+        v1 = Vault(vault_path, "mdp")
         for _ in range(3):
-            v.register_failed_attempt()
-        assert v.is_locked()
+            v1.register_failed_attempt()
+        assert v1.is_locked()
+
+        # Une nouvelle instance doit aussi voir le verrou (persistance .lock)
+        v2 = Vault(vault_path, "mdp")
+        assert v2.is_locked()
+
+        # load_vault() doit lever LockedError
+        with pytest.raises(LockedError):
+            v2.load_vault()
