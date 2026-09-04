@@ -21,6 +21,7 @@ Thumbs.db
 *.vault
 *.dat
 *.lbox
+*.vault.lock
 
 # Build PyInstaller
 dist/

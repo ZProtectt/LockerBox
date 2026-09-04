@@ -15,8 +15,8 @@ de passe sans rechiffrement et une protection anti‑bruteforce persistante.
   erronées, persistant via un fichier `.lock`.
 - **Changement de mot de passe transparent** : Seule la clé d’enveloppe est
   rechiffrée, les fichiers restent inchangés.
-- **Interface CLI conviviale** : Messages clairs avec émojis, gestion d’erreur
-  robuste, aide intégrée.
+- **Interface CLI** : Commandes simples pour créer, remplir et consulter le
+  vault, avec aide intégrée.
 
 ## Installation
 Assurez‑vous d'avoir **Python 3.9 ou supérieur**.
@@ -32,6 +32,13 @@ Les dépendances sont listées dans `requirements.txt` :
 - `argon2‑cffi` : Dérivation de clé via Argon2id.
 - `cryptography` : Chiffrement AES‑GCM.
 - `click` : Interface CLI moderne.
+- `pyinstaller` : Création d'un exécutable à partir du programme Python.
+
+Pour créer un exécutable Windows après l'installation :
+```powershell
+pyinstaller --onefile --name LockerBox main.py
+```
+Le fichier sera créé dans le dossier `dist/`.
 
 ## Utilisation rapide
 ```powershell
@@ -73,6 +80,21 @@ aux fichiers.
 [N octets] Index chiffré (nonce + ciphertext + tag)
 […]         Blobs des fichiers (nonce + ciphertext + tag par fichier)
 ```
+
+Chaque fichier est lu comme une suite d'octets, puis chiffre avec AES-GCM.
+L'utilisation de `rb` et `wb` permet de conserver les fichiers binaires sans
+les convertir en texte.
+
+### Vérification d'intégrité
+Lors de l'ouverture, le programme déchiffre l'index et la clé de données
+enveloppée. Cette étape vérifie le mot de passe et détecte une modification de
+l'index. Lors de l'extraction, le blob du fichier est également vérifié par
+AES-GCM avant son écriture sur le disque.
+
+Le header contient des informations nécessaires à la lecture, mais n'est pas
+un bloc AES-GCM séparé. Une modification du header peut donc provoquer une
+erreur de format ou d'authentification plutôt qu'un message spécifique de
+tampering.
 
 ### Anti‑bruteforce persistant
 Lorsqu'une tentative d'authentification échoue, un fichier `.lock` est mis à jour

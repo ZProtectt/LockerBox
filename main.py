@@ -1,244 +1,186 @@
 #!/usr/bin/env python3
-"""
-SecureVault – Interface CLI pour le coffre-fort chiffré.
+"""Interface en ligne de commande de LockerBox."""
 
-Ce module implémente une interface utilisateur en ligne de commande complète
-pour gérer des coffres chiffrés (`Vault`). Il utilise la bibliothèque `Click`
-pour une expérience utilisateur moderne avec auto‑aide, gestion d'options,
-et messages d'erreur clairs (avec émojis).
-
-Le CLI contrôle la sécurité d'en‑tête en vérifiant systématiquement le
-verrouillage anti‑bruteforce avant toute interaction avec le coffre.
-"""
+import logging
+import os
+import time
+from logging.handlers import RotatingFileHandler
 
 import click
 
-from source.vault import LockedError, Vault
+from source.vault import (
+    LockedError,
+    add_file,
+    change_password as change_vault_password,
+    create_vault,
+    delete_file,
+    extract_file,
+    is_locked,
+    list_files,
+    locked_until,
+    new_vault,
+)
+
+
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+LOG_FILE = os.path.join(LOG_DIR, "lockerbox.log")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+logger = logging.getLogger("lockerbox")
+logger.setLevel(logging.ERROR)
+logger.propagate = False
+logger.addHandler(
+    RotatingFileHandler(
+        LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+    )
+)
+
+
+def log_error(action, error):
+    """Enregistre une erreur sans écrire de mot de passe ni de chemin."""
+    logger.error("action=%s error=%s", action, type(error).__name__)
 
 
 @click.group()
 @click.option("--vault", "-v", required=True, help="Chemin vers le fichier vault.")
 @click.pass_context
-def cli(ctx, vault: str):
-    """
-    SecureVault – coffre‑fort chiffré en ligne de commande.
-    
-    Cette fonction est le point d'entrée de toutes les commandes. Elle :
-      1. Vérifie que le coffre n'est pas verrouillé (anti‑bruteforce).
-      2. Demande le mot de passe maître de manière sécurisée.
-      3. Instancie un objet `Vault` (coffre) et le stocke dans le contexte
-         Click pour les sous‑commandes.
-         
-    Le verrouillage est vérifié AVANT de demander le mot de passe, ce qui
-    réduit les canaux auxiliaires et protège contre le déni de service.
-    
-    Raises:
-        SystemExit(1): Si le coffre est temporairement verrouillé.
-    """
-    # Vérification du verrouillage anti‑bruteforce AVANT de demander le mot de passe.
-    # Cette pré‑vérification évite de révéler que le coffre existe ou non.
-    temp = Vault(vault, "")
-    if temp.is_locked():
-        import time
-        remaining = int(temp.locked_until - time.time())
-        click.echo(
-            f"🔒 Verrouillé ! Trop de tentatives. Réessayez dans {remaining} secondes.",
-            err=True,
-        )
-        raise SystemExit(1)
+def cli(context, vault):
+    """Prepare le vault et le mot de passe pour la commande choisie."""
+    if is_locked(vault):
+        remaining = max(0, int(locked_until(vault) - time.time()))
+        click.echo(f"Verrouillé. Réessayez dans {remaining} secondes.", err=True)
+        raise click.exceptions.Exit(1)
 
-    # Demande sécurisée du mot de passe (masqué à l'écran)
     password = click.prompt("Mot de passe maître", hide_input=True)
-    ctx.obj = Vault(vault, password)  # Stockage pour les sous‑commandes
+    context.obj = new_vault(vault, password)
 
 
 @cli.command()
-def create():
-    """
-    Initialise un nouveau coffre vide (fichier .vault).
-    
-    Cette commande crée un fichier sur le disque avec :
-      - Un sel aléatoire de 16 octets (pour Argon2id).
-      - Une clé de données aléatoire de 32 octets (pour AES‑256‑GCM).
-      - Un index chiffré vide.
-      
-    Le coffre créé est immédiatement fonctionnel.
-    
-    Note:
-        Le coffre doit être vide. Si un fichier existe déjà au même emplacement,
-        il est écrasé (heureusement, Click protège avec confirmation implicite).
-        
-    Returns:
-        Message de succès via `click.echo`, émoji ✅.
-    """
-    vault = click.get_current_context().obj
+@click.pass_obj
+def create(vault):
+    """Cree un fichier vault vide."""
     try:
-        vault.create_vault()
-        click.echo("✅ Vault créé avec succès.")
-    except Exception as e:
-        click.echo(f"❌ Erreur lors de la création : {e}", err=True)
+        if os.path.exists(vault["path"]):
+            click.echo("Vault déjà existant.", err=True)
+            return
+        click.echo("Attention : un mot de passe oublié ne peut pas être récupéré.")
+        create_vault(vault)
+        click.echo("Vault créé avec succès.")
+    except Exception as error:
+        log_error("create", error)
+        click.echo(f"Erreur lors de la création : {error}", err=True)
 
 
 @cli.command()
 @click.argument("file_path")
-def add(file_path: str):
-    """
-    Ajoute un fichier du système de fichiers dans le coffre.
-    
-    Le fichier est lu, chiffré avec AES‑256‑GCM, puis ajouté à la fin des
-    blobs existants. Le coffre est entièrement ré‑écrit (optimisation future
-    possible avec des index retours).
-    
-    Args:
-        file_path: Chemin absolu ou relatif vers le fichier à ajouter.
-        
-    Raises:
-        FileNotFoundError (capturée) : Si le fichier source n'existe pas.
-        LockedError (capturée)       : Si le coffre est temporairement verrouillé.
-        
-    Returns:
-        Message de confirmation avec le nom de base du fichier, émoji ✅.
-    """
-    import os
-    vault = click.get_current_context().obj
+@click.pass_obj
+def add(vault, file_path):
+    """Lit, chiffre et ajoute un fichier au vault."""
     try:
-        vault.add_file(file_path)
-        click.echo(f"✅ Fichier '{os.path.basename(file_path)}' ajouté.")
-    except FileNotFoundError as e:
-        click.echo(f"❌ Fichier source non trouvé : {e}", err=True)
-    except LockedError as e:
-        click.echo(f"❌ Verrouillé : {e}", err=True)
-    except Exception as e:
-        click.echo(f"❌ Erreur inattendue : {e}", err=True)
-
-
-@cli.command()
-def list_files():
-    """
-    Affiche la liste des fichiers stockés dans le coffre.
-    
-    Cette commande déchiffre l'index du coffre (ce qui vérifie le mot de passe)
-    et affiche les noms des fichiers. Si le coffre est vide, un message adapté
-    est montré avec l'émoji 📭.
-    
-    Raises:
-        LockedError (capturée) : Si le coffre est temporairement verrouillé.
-        IntegrityError (capturée via Exception) : Si le mot de passe est faux.
-        
-    Returns:
-        Liste formatée des noms de fichiers, ou indication de vide.
-    """
-    vault = click.get_current_context().obj
-    try:
-        files = vault.list_files()
-        if not files:
-            click.echo("📭 Le vault est vide.")
+        filename = os.path.basename(file_path)
+        if os.path.exists(vault["path"]) and filename in list_files(vault):
+            click.echo(f"Le fichier '{filename}' existe déjà et ne peut pas être ajouté.", err=True)
             return
-        click.echo("📁 Fichiers dans le vault :")
+        add_file(vault, file_path)
+        click.echo(f"Fichier '{filename}' ajouté.")
+    except FileNotFoundError as error:
+        log_error("add", error)
+        click.echo(f"Fichier source non trouvé : {error}", err=True)
+    except LockedError as error:
+        log_error("add", error)
+        click.echo(f"Verrouillé : {error}", err=True)
+    except Exception as error:
+        log_error("add", error)
+        click.echo(f"Erreur inattendue : {error}", err=True)
+
+
+@cli.command(name="list-files")
+@click.pass_obj
+def list_command(vault):
+    """Affiche les noms des fichiers presents dans le vault."""
+    try:
+        files = list_files(vault)
+        if not files:
+            click.echo("Le vault est vide.")
+            return
         for name in files:
-            click.echo(f" - {name}")
-    except LockedError as e:
-        click.echo(f"❌ Verrouillé : {e}", err=True)
-    except Exception as e:
-        click.echo(f"❌ Erreur inattendue : {e}", err=True)
+            click.echo(name)
+    except Exception as error:
+        log_error("list", error)
+        click.echo(f"Erreur : {error}", err=True)
 
 
 @cli.command()
 @click.argument("filename")
 @click.argument("output_path")
-def extract(filename: str, output_path: str):
-    """
-    Extrait un fichier du coffre vers le système de fichiers.
-    
-    Le fichier est cherché dans l'index du coffre, déchiffré avec vérification
-    d'intégrité (tag AES‑GCM) et écrit à l'emplacement spécifié.
-    
-    Args:
-        filename: Nom du fichier dans le coffre (tel que listé par `list_files`).
-        output_path: Chemin où écrire le fichier déchiffré.
-        
-    Raises:
-        FileNotFoundError (capturée) : Si le fichier n'existe pas dans le coffre.
-        LockedError (capturée)       : Si le coffre est temporairement verrouillé.
-        IntegrityError (capturée via Exception) : Si les données sont corrompues.
-        
-    Returns:
-        Message de succès avec noms source et destination, émoji ✅.
-    """
-    vault = click.get_current_context().obj
+@click.pass_obj
+def extract(vault, filename, output_path):
+    """Dechiffre un fichier du vault vers le disque."""
     try:
-        vault.extract_file(filename, output_path)
-        click.echo(f"✅ Fichier '{filename}' extrait vers '{output_path}'.")
-    except FileNotFoundError as e:
-        click.echo(f"❌ Fichier non trouvé : {e}", err=True)
-    except LockedError as e:
-        click.echo(f"❌ Verrouillé : {e}", err=True)
-    except Exception as e:
-        click.echo(f"❌ Erreur inattendue : {e}", err=True)
+        if os.path.exists(output_path):
+            click.echo(f"Attention : '{output_path}' existe déjà et sera remplacé.")
+        extract_file(vault, filename, output_path)
+        click.echo(f"Fichier '{filename}' extrait vers '{output_path}'.")
+    except FileNotFoundError as error:
+        log_error("extract", error)
+        click.echo(f"Fichier non trouvé : {error}", err=True)
+    except LockedError as error:
+        log_error("extract", error)
+        click.echo(f"Verrouillé : {error}", err=True)
+    except Exception as error:
+        log_error("extract", error)
+        click.echo(f"Erreur inattendue : {error}", err=True)
 
 
 @cli.command()
 @click.argument("filename")
-def delete(filename: str):
-    """
-    Supprime un fichier du coffre sans rechiffrer les autres.
-    
-    Cette commande ré‑écrit entièrement le fichier vault en excluant le
-    blob du fichier à supprimer. Les offsets des fichiers restants sont
-    recalculés et l'index est mis à jour.
-    
-    Args:
-        filename: Nom du fichier à supprimer (doit exister dans le coffre).
-        
-    Raises:
-        FileNotFoundError (capturée) : Si le fichier n'existe pas dans le coffre.
-        LockedError (capturée)       : Si le coffre est temporairement verrouillé.
-        
-    Returns:
-        Message de confirmation avec émoji 🗑️.
-    """
-    vault = click.get_current_context().obj
+@click.pass_obj
+def delete(vault, filename):
+    """Supprime un fichier du vault."""
     try:
-        vault.delete_file(filename)
-        click.echo(f"🗑️  Fichier '{filename}' supprimé.")
-    except FileNotFoundError as e:
-        click.echo(f"❌ Fichier non trouvé : {e}", err=True)
-    except LockedError as e:
-        click.echo(f"❌ Verrouillé : {e}", err=True)
-    except Exception as e:
-        click.echo(f"❌ Erreur inattendue : {e}", err=True)
+        delete_file(vault, filename)
+        click.echo(f"Fichier '{filename}' supprimé.")
+    except FileNotFoundError as error:
+        log_error("delete", error)
+        click.echo(f"Fichier non trouvé : {error}", err=True)
+    except LockedError as error:
+        log_error("delete", error)
+        click.echo(f"Verrouillé : {error}", err=True)
+    except Exception as error:
+        log_error("delete", error)
+        click.echo(f"Erreur inattendue : {error}", err=True)
 
 
 @cli.command(name="change-password")
-@click.option("--new-password", prompt=True, hide_input=True, confirmation_prompt=True,
-              help="Nouveau mot de passe maître.")
-def change_password(new_password: str):
-    """
-    Change le mot de passe maître sans rechiffrer les fichiers.
-    
-    Cette opération exploite l'architecture à deux clés du coffre :
-      - La clé de données (`key`) reste inchangée.
-      - Seule la wrapped_key (enveloppe chiffrée) est rechiffrée avec la
-        nouvelle clé dérivée du nouveau mot de passe.
-        
-    Le sel est régénéré (bonne pratique cryptographique). L'opération est
-    rapide quelle que soit la taille des fichiers stockés.
-    
-    Raises:
-        ValueError (capturée implicitement) : Si le nouveau mot de passe est invalide.
-        LockedError (capturée) : Si le coffre est temporairement verrouillé.
-        
-    Returns:
-        Message de succès avec émoji 🔑.
-    """
-    vault = click.get_current_context().obj
+@click.option("--new-password", prompt=True, hide_input=True,
+              confirmation_prompt=True, help="Nouveau mot de passe maître.")
+@click.pass_obj
+def change_password(vault, new_password):
+    """Remplace le mot de passe du vault."""
     try:
-        vault.change_password(new_password)
-        click.echo("🔑 Mot de passe changé avec succès.")
-    except LockedError as e:
-        click.echo(f"❌ Verrouillé : {e}", err=True)
-    except Exception as e:
-        click.echo(f"❌ Erreur inattendue : {e}", err=True)
+        change_vault_password(vault, new_password)
+        click.echo("Mot de passe changé avec succès.")
+    except LockedError as error:
+        log_error("change-password", error)
+        click.echo(f"Verrouillé : {error}", err=True)
+    except Exception as error:
+        log_error("change-password", error)
+        click.echo(f"Erreur inattendue : {error}", err=True)
+
+
+# Ordre affiche dans l'aide du CLI.
+cli.commands = {
+    name: cli.commands[name]
+    for name in ("create", "change-password", "list-files", "add", "delete", "extract")
+}
+
+
+def command_names(context):
+    """Retourne les commandes dans l'ordre choisi pour l'aide."""
+    return list(cli.commands)
+
+
+cli.list_commands = command_names
 
 
 if __name__ == "__main__":

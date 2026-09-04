@@ -1,4 +1,4 @@
 argon2-cffi==25.1.0
-argon2-cffi-bindings==25.1.0
 cryptography==50.0.0
 click==8.5.0
+pyinstaller

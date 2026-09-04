@@ -62,11 +62,17 @@ Pour chaque fichier stocké :
     *   Déchiffrer `wrapped_key` avec `PasswordKey` pour obtenir la clé de données.
     *   Si l'erreur `InvalidTag` survient : **Le mot de passe est faux ou le vault est corrompu.**
 4.  **Accéder aux données :** Utiliser la clé de données et les informations de l'index pour lire `offset` et `size` octets.
+5.  **Vérifier un fichier :** Lors de l'extraction, déchiffrer son blob avec
+  AES-GCM. Le tag vérifie l'intégrité du fichier avant son écriture.
+
+L'ouverture vérifie donc immédiatement l'index, mais les blobs des fichiers
+sont vérifiés lorsqu'ils sont extraits. Le header est lu avant le déchiffrement
+et n'est pas authentifié par un tag AES-GCM séparé.
 
 ---
 
 ## 4. Pourquoi ce design est sécurisé
 
 1.  **Indépendance des fichiers :** Chaque fichier a son propre `Nonce`. Même si tu stockes deux fois le même fichier, leurs contenus chiffrés seront différents.
-2.  **Protection contre l'altération (Tampering) :** Grâce à **AES-GCM**, si un attaquant modifie un seul octet du fichier chiffré (dans l'index ou dans les données), le `Tag` ne correspondra plus. La bibliothèque de chiffrement lèvera une exception automatiquement lors du déchiffrement.
+2.  **Protection contre l'altération (Tampering) :** Grâce à **AES-GCM**, si un attaquant modifie un seul octet de l'index ou d'un blob chiffré, le `Tag` ne correspondra plus. La bibliothèque de chiffrement lèvera une exception lors de l'ouverture pour l'index, ou lors de l'extraction pour le fichier concerné.
 3.  **Confidentialité des métadonnées :** L'index est chiffré. Un attaquant ne peut pas savoir quels sont les noms des fichiers contenus dans le vault.

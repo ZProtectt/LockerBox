@@ -17,7 +17,7 @@ Les propriétés de sécurité recherchées sont :
 - **AES-256-GCM :** Chiffrement authentifié garantissant que si le fichier `.vault` est modifié, le déchiffrement échouera (détection d'intégrité).
 - **Index chiffré :** Empêche de connaître la structure ou les noms des fichiers présents dans le vault sans la clé.
 - **Clé de données intermédiaire :** La clé des fichiers est aléatoire et seule son enveloppe est modifiée lors d'un changement de mot de passe.
-- **Verrouillage temporaire :** L'interface bloque les nouvelles tentatives après trois échecs pendant 30 secondes.
+- **Verrouillage temporaire :** L'interface bloque les nouvelles tentatives après trois échecs pendant 60 secondes.
 
 ## 4. Limites
 - **Sécurité du mot de passe :** Si le mot de passe maître est faible, la sécurité globale est compromise.
