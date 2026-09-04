@@ -1,10 +1,24 @@
+
 import os
 import tempfile
 
 import pytest
 
 from source.crypto import derive_key, decrypt_data, encrypt_data
-from source.vault import IntegrityError, LockedError, Vault
+from source.vault import (
+    IntegrityError,
+    LockedError,
+    add_file,
+    change_password,
+    create_vault,
+    delete_file,
+    extract_file,
+    is_locked,
+    list_files,
+    load_vault,
+    new_vault,
+    register_failed_attempt,
+)
 
 
 # ── Tests crypto ──────────────────────────────────────────────────────────
@@ -44,20 +58,39 @@ def test_vault_add_and_extract():
         out = os.path.join(d, "output.txt")
         open(src, "wb").write(b"contenu secret")
 
-        v = Vault(vault_path, "motdepasse")
-        v.create_vault()
-        v.add_file(src)
-        v.extract_file("secret.txt", out)
+        v = new_vault(vault_path, "motdepasse")
+        create_vault(v)
+        add_file(v, src)
+        extract_file(v, "secret.txt", out)
         assert open(out, "rb").read() == b"contenu secret"
+
+
+def test_vault_binary_file_roundtrip():
+    """Un fichier binaire est conserve octet par octet."""
+    with tempfile.TemporaryDirectory() as d:
+        vault_path = os.path.join(d, "binary.lbox")
+        src = os.path.join(d, "image.bin")
+        out = os.path.join(d, "restored.bin")
+        data = bytes(range(256)) + b"\x00\xff\x00"
+        with open(src, "wb") as file:
+            file.write(data)
+
+        vault = new_vault(vault_path, "motdepasse")
+        create_vault(vault)
+        add_file(vault, src)
+        extract_file(vault, "image.bin", out)
+
+        with open(out, "rb") as file:
+            assert file.read() == data
 
 
 def test_vault_wrong_password():
     """Ouvrir avec un mauvais mot de passe doit lever IntegrityError."""
     with tempfile.TemporaryDirectory() as d:
         vault_path = os.path.join(d, "test.lbox")
-        Vault(vault_path, "bon").create_vault()
+        create_vault(new_vault(vault_path, "bon"))
         with pytest.raises(IntegrityError):
-            Vault(vault_path, "mauvais").load_vault()
+            load_vault(new_vault(vault_path, "mauvais"))
 
 
 def test_vault_delete_file():
@@ -70,13 +103,13 @@ def test_vault_delete_file():
         open(f1, "wb").write(b"aaa")
         open(f2, "wb").write(b"bbb")
 
-        v = Vault(vault_path, "mdp")
-        v.create_vault()
-        v.add_file(f1)
-        v.add_file(f2)
-        v.delete_file("a.txt")
-        assert v.list_files() == ["b.txt"]
-        v.extract_file("b.txt", out)
+        v = new_vault(vault_path, "mdp")
+        create_vault(v)
+        add_file(v, f1)
+        add_file(v, f2)
+        delete_file(v, "a.txt")
+        assert list_files(v) == ["b.txt"]
+        extract_file(v, "b.txt", out)
         assert open(out, "rb").read() == b"bbb"
 
 
@@ -88,16 +121,16 @@ def test_vault_change_password():
         out = os.path.join(d, "out.txt")
         open(src, "wb").write(b"donnee")
 
-        v = Vault(vault_path, "ancien")
-        v.create_vault()
-        v.add_file(src)
-        v.change_password("nouveau")
+        v = new_vault(vault_path, "ancien")
+        create_vault(v)
+        add_file(v, src)
+        change_password(v, "nouveau")
 
         with pytest.raises(IntegrityError):
-            Vault(vault_path, "ancien").load_vault()
+            load_vault(new_vault(vault_path, "ancien"))
 
-        v2 = Vault(vault_path, "nouveau")
-        v2.extract_file("secret.txt", out)
+        v2 = new_vault(vault_path, "nouveau")
+        extract_file(v2, "secret.txt", out)
         assert open(out, "rb").read() == b"donnee"
 
 
@@ -107,15 +140,15 @@ def test_vault_bruteforce_lock():
         vault_path = os.path.join(d, "v.lbox")
 
         # 3 échecs sur une première instance
-        v1 = Vault(vault_path, "mdp")
+        v1 = new_vault(vault_path, "mdp")
         for _ in range(3):
-            v1.register_failed_attempt()
-        assert v1.is_locked()
+            register_failed_attempt(vault_path)
+        assert is_locked(vault_path)
 
         # Une nouvelle instance doit aussi voir le verrou (persistance .lock)
-        v2 = Vault(vault_path, "mdp")
-        assert v2.is_locked()
+        v2 = new_vault(vault_path, "mdp")
+        assert is_locked(vault_path)
 
         # load_vault() doit lever LockedError
         with pytest.raises(LockedError):
-            v2.load_vault()
+            load_vault(v2)
