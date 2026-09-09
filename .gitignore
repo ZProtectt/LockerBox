@@ -17,7 +17,7 @@ Thumbs.db
 .pytest_cache/
 *.log
 
-# Fichiers vault (ne jamais versionner)
+# Fichiers vault
 *.vault
 *.dat
 *.lbox
@@ -27,6 +27,3 @@ Thumbs.db
 dist/
 build/
 *.spec
-
-# Divers
-.clineignore

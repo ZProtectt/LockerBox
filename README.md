@@ -12,7 +12,7 @@ de passe sans rechiffrement et une protection anti‑bruteforce persistante.
 - **Dérivation de clé** : Argon2id avec paramètres réglés pour une résistance
   élevée aux attaques par force brute.
 - **Protection anti‑bruteforce** : Verrouillage temporaire après 3 tentatives
-  erronées, persistant via un fichier `.lock`.
+  erronées, persistant dans un état local séparé du vault.
 - **Changement de mot de passe transparent** : Seule la clé d’enveloppe est
   rechiffrée, les fichiers restent inchangés.
 - **Interface CLI** : Commandes simples pour créer, remplir et consulter le
@@ -97,10 +97,10 @@ erreur de format ou d'authentification plutôt qu'un message spécifique de
 tampering.
 
 ### Anti‑bruteforce persistant
-Lorsqu'une tentative d'authentification échoue, un fichier `.lock` est mis à jour
-avec un compteur et un délai de verrouillage. Le mécanisme survit aux redémarrages
-du programme. Après trois échecs consécutifs, le coffre est bloqué pendant 60
-secondes.
+Lorsqu'une tentative d'authentification échoue, un état local séparé du vault est
+mis à jour avec un compteur et un délai de verrouillage. Le mécanisme survit aux
+redémarrages du programme et ne dépend plus d'un fichier `.lock` placé à côté du
+vault. Après trois échecs consécutifs, le coffre est bloqué pendant 60 secondes.
 
 ## Documentation technique
 - [`docs/threat_model.md`](docs/threat_model.md) : Modèle de menace complet.
